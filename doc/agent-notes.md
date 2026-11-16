@@ -17,9 +17,39 @@ README instead.
   at once in the background with a `sed` variant per constant, not by watching
   it: `examples/lander`'s crash rate at one setting varies by half between
   seeds, and its archive statistics read well long before its streams do.
-- An elitist archive under a noisy objective selects for luck. Score a
-  genotype by the mean of several evaluations and re-evaluate archived members
-  (`examples/lander`'s trials and refreshes) before touching the operators.
+- An elitist archive under a noisy objective selects for luck: settle its
+  scores by repeats ([README](../README.md#repeat-outcomes)) before touching
+  the operators.
+- A noisy search over a network's weights was measured on a learner kept out of
+  the tree, to rebuild before changing what it settled: 148 weights (16 inputs,
+  six `tanh` units, a direct term) from a hand-written policy, one evaluation
+  in flight, on a scrolling game scored by ticks survived and kills. Read the
+  mean over 64 held-out rounds of the best member scored twice, twelve seeds a
+  setting: one setting's seeds span 3,300 to 4,200. A second objective, the
+  network fitted to a teacher's outputs through noisy batches, does not
+  saturate, and shows a stall the game hides. Every row spends 12,000 rounds
+  on the game and 36,000 batches on the fit, at a step of 0.03 of the range:
+
+  ```
+                                               game   fit, squared error
+  one round an evaluation, no repeats          3070   19
+  mean of three, no repeats                    3360    3.7
+  one round, every third a Reevaluate          3330    1.5
+  one round, the same under MeanScore          3545    1.6
+  mean of three, every third, either way       3570    1.6
+  separable CMA-ES, mean of three              3290    1.4
+  ```
+
+- On the same learner a step of 0.1 left one seed in twelve at its seed genome
+  for 4,000 evaluations, and 0.02 to 0.05 none. `AdaptiveStrength` from 0.1
+  ends level with the best fixed step at a `lo` of 0.02 (3610, 1.7) and
+  stalls at 0.005 (3450, 15). A share of repeats from a half to a fifth, a
+  pool of 16 or 32 and `BlockCombiner` against `UniformCombiner` all end
+  within the seeds' spread of one another.
+- `Reevaluate`'s order was tried two other ways there, a new member first and
+  the fewest outcomes first: 3450 and 3370 against 3570 by age under a
+  schedule, level without one. A schedule following the average score, and one
+  decaying by generation, ended level with `AdaptiveStrength` at its floor.
 - `Engine.Checkpoint`'s members alias the engine's buffers, which the next
   generation writes over: copy them before running the source engine on, as its
   test does. `Restore` into an engine of another configuration or pool size is

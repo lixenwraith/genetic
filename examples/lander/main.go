@@ -159,14 +159,11 @@ type source struct {
 	startX float64
 	engine *genetic.StreamingEngine[[]float64, float64]
 
-	live       int
-	trials     []trial
-	current    int // The trial whose flights are being released, or -1
-	started    int
-	generation int
-	members    []genetic.Candidate[[]float64, float64] // The archive at its last generation, re-flown in turn
-	refresh    int
-	sweep      int // Members still to re-fly before breeding resumes, after the pad moved
+	live    int
+	trials  []trial
+	current int // The trial whose flights are being released, or -1
+	started int
+	sweep   int // Members still to re-fly before breeding resumes, after the pad moved
 
 	// The last recent flights' outcomes: the archive holds each genotype's last
 	// score, not how the stream fares now
@@ -217,9 +214,9 @@ func newSource(name, colour string, startX float64, seed uint64) source {
 
 // nextTrial returns the trial the next release flies for: the current one while
 // it has flights left, else a new one, bred by the engine or, every
-// refreshEvery-th and throughout a sweep, an archive member re-flown since its
-// score is as old as the other stream's behaviour when it was set. Nil when
-// the engine gives nothing
+// refreshEvery-th and throughout a sweep, the archive member scored longest
+// ago, whose score is as old as the other stream's behaviour when it was set.
+// Nil when the engine gives nothing
 func (s *source) nextTrial() *trial {
 	if s.current >= 0 && s.trials[s.current].flights < flightsPerTrial {
 		return &s.trials[s.current]
@@ -228,22 +225,22 @@ func (s *source) nextTrial() *trial {
 	if i < 0 {
 		return nil
 	}
-	t := &s.trials[i]
 	s.started++
-	if (s.sweep > 0 || s.started%refreshEvery == 0) && len(s.members) > 0 {
-		s.sweep = max(s.sweep-1, 0)
-		genes := slices.Clone(s.members[s.refresh%len(s.members)].Data)
-		s.refresh++
-		*t = trial{id: s.engine.BeginEvaluation(genes), genes: genes, live: true}
-	} else {
-		genes, id := s.engine.Propose()
-		if id == 0 {
+	var genes []float64
+	var id genetic.EvalID
+	if s.sweep > 0 || s.started%refreshEvery == 0 {
+		if genes, id = s.engine.Reevaluate(); id != 0 {
+			s.sweep = max(s.sweep-1, 0)
+		}
+	}
+	if id == 0 {
+		if genes, id = s.engine.Propose(); id == 0 {
 			return nil
 		}
-		*t = trial{id: id, genes: genes, live: true}
 	}
+	s.trials[i] = trial{id: id, genes: genes, live: true}
 	s.current = i
-	return t
+	return &s.trials[i]
 }
 
 // finish adds a flight's score to its trial and reports the mean once the
@@ -308,14 +305,6 @@ func (s *source) zone() float64 {
 		return 0
 	}
 	return total / float64(n)
-}
-
-// refreshMembers copies the archive once per generation for re-flights
-func (s *source) refreshMembers() {
-	if g := s.engine.Generation(); s.members == nil || g != s.generation {
-		s.generation = g
-		s.members = s.engine.Snapshot().Members
-	}
 }
 
 type mark struct {
@@ -399,9 +388,6 @@ func (w *world) collide() {
 // engines out of release order
 func (w *world) advance() {
 	w.tick++
-	for s := range w.sources {
-		w.sources[s].refreshMembers()
-	}
 	w.release()
 	w.collide()
 	for i := range w.landers {
@@ -451,7 +437,6 @@ func (w *world) retarget(dx int) {
 			pool.Members[i].Score = run.score(x)
 		}
 		src.engine.Inject(pool.Members, pool.Generation)
-		src.members = nil
 		src.sweep = len(pool.Members)
 		src.flights = 0
 	}
