@@ -69,6 +69,34 @@ func TestRouletteSelector_NegativeScores(t *testing.T) {
 	}
 }
 
+// A block goes to a child whole, from either parent, and an element no block
+// names stays with its own parent
+func TestBlockCombiner_KeepsABlockWithOneParent(t *testing.T) {
+	parents := []Candidate[[]int, float64]{{Data: []int{1, 1, 1, 1, 1, 1}}, {Data: []int{2, 2, 2, 2, 2, 2}}}
+	bc := &BlockCombiner[[]int, int, float64]{Blocks: [][]int{{0, 3, 4}, {1, 2}}, MixProbability: 0.5}
+	rng := rand.New(rand.NewPCG(1, 2))
+	dst := make([][]int, 2)
+	seen := map[[2]int]bool{}
+	for range 64 {
+		if n := bc.Combine(parents, dst, rng); n != 2 {
+			t.Fatalf("wrote %d offspring, want 2", n)
+		}
+		a, b := dst[0], dst[1]
+		if a[3] != a[0] || a[4] != a[0] || a[2] != a[1] || a[5] != 1 || b[5] != 2 {
+			t.Fatalf("a block was split or a free element moved: %v %v", a, b)
+		}
+		for i := range a[:5] {
+			if a[i]+b[i] != 3 {
+				t.Fatalf("the offspring are not complements: %v %v", a, b)
+			}
+		}
+		seen[[2]int{a[0], a[1]}] = true
+	}
+	if len(seen) != 4 {
+		t.Fatalf("the blocks mixed %d ways of 4", len(seen))
+	}
+}
+
 // Bin decodes every bin centre back to its own bin, including the last
 func TestParameterBounds_BinCenterRoundTrips(t *testing.T) {
 	b := ParameterBounds{Min: -2, Max: 3}

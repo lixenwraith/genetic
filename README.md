@@ -50,6 +50,7 @@ type Numeric interface {
 type Candidate[S Solution, F Numeric] struct {
     Data  S
     Score F
+    Count int // Outcomes a streaming archive's Score holds; 0 from the batch engine
 }
 
 type Pool[S Solution, F Numeric] struct {
@@ -75,6 +76,8 @@ type EvaluatorFunc[S Solution, F Numeric]   func(solution S) F
 type TerminationFunc[S Solution, F Numeric] func(pool *Pool[S, F], iteration int) bool
 type DiversityFunc[S Solution, F Numeric]   func(members []Candidate[S, F]) float64
 type EqualFunc[S Solution]                  func(a, b S) bool
+type MergeFunc[F Numeric]                   func(old, new F, count int) F
+type ScheduleFunc[F Numeric]                func(generation int, stats PoolStats[F]) (rate, strength float64)
 ```
 
 ---
@@ -105,13 +108,11 @@ crossover stops contributing. `SetEqual` closes it:
 e.SetEqual(slices.Equal[[]float64])
 ```
 
-With it a genotype is archived once, at its latest score: a repeat outcome
-moves the member to where its new score sorts, up or down, instead of adding a
-second copy. The check is one comparison per archive member on each outcome.
-That is what lets an archive follow a changing objective: a host that re-flies
-archived genotypes now and then, as the lander example does, replaces scores
-set when the world was otherwise, where a best-score rule would keep every
-lucky outcome for good. `registry` installs it for every species.
+With it a genotype is archived once: a repeat outcome moves the member to where
+its score now sorts, up or down, instead of adding a second copy. The check is
+one comparison per archive member on each outcome. `registry` installs it for
+every species, and [repeat outcomes](#repeat-outcomes) are what keep an
+archive's scores true.
 
 Generations advance on *outcome count*, not on batch boundaries:
 `MinOutcomesPerGen` completed evaluations increment `Generation` and trigger a
@@ -171,12 +172,59 @@ poor outcome, expect the first generations to breed from poor stock before the
 slow, good outcomes arrive. Waiting for a full archive before breeding was
 measured on the lander example and changed nothing, so the engine does not.
 
+### Repeat outcomes
+
 An elitist archive admits an outcome, not a genotype's expectation, so under a
 noisy objective it selects for luck: a controller that crashes two flights in
-five is archived on the three it did not. When the noise is the point, as it is
-whenever another population is part of the objective, score each genotype by
-the mean of several evaluations and report that once; the lander example flies
-each genotype four times before completing its evaluation.
+five is archived on the three it did not, and stays. Two habits answer it.
+Score a genotype by the mean of several evaluations and report that once, as
+the lander example flies each genotype four times; and evaluate archive members
+again, which `Reevaluate` hands out in turn:
+
+```go
+genes, id := e.Reevaluate()     // id == 0: stopped, empty, or no SetEqual
+```
+
+It returns the member scored or handed out longest ago, the better of two that
+tie, so a host that calls it in place of every nth `Propose` goes round the
+archive, and its outcome comes back through `CompleteEvaluation` like any
+other. What a repeat does to the score is the host's to say:
+
+- By default the new score replaces the old, which follows an objective that
+  moves: another population, as in the lander example, or a world that changes.
+- `SetMerge` folds it into the score held, for a noisy objective that stays
+  put. `MeanScore` keeps the running mean, and `Candidate.Count` the outcomes
+  in it:
+
+```go
+e.SetMerge(genetic.MeanScore[float64])
+```
+
+A `MergeFunc` takes the score held, the new one and the count behind the first,
+so a capped mean, an exponential one or the better of the two is a line. A
+member enters on one outcome whatever the others hold, so the head of a merged
+archive can be a lucky newcomer: a host that fields its best takes the first
+member whose `Count` it trusts from `Snapshot`, not `Best`.
+
+### Schedule
+
+```go
+e.SetSchedule(schedule)         // The ScheduleFunc the batch engine takes
+```
+
+A schedule is consulted as each generation ends, with the generation and the
+stats, for the rate and strength later offspring are bred with. Proposals
+already queued keep theirs, and the configuration's pair holds until the first
+generation ends. The pair in force travels in a checkpoint; a schedule's own
+memory does not, so one that must continue exactly computes from its arguments
+alone.
+
+`AdaptiveStrength` serves here as in the batch engine, and shrinks the step as
+the archive settles. Under a noisy objective it settles early: a lucky best is
+a mark later generations seldom beat, so the strength reaches `lo` within a few
+hundred evaluations and stays near it. Make `lo` the step the search should
+keep once settled, a few hundredths of a gene's range, not a bound it should
+never touch.
 
 ### Ownership
 
@@ -189,9 +237,10 @@ The `Cloner` argument decides who owns what:
 
 `SliceCloner[S, T]` covers slice genotypes and reuses `dst` capacity. Pass `nil`
 only when the caller provably reads the genotype and discards it before the next
-`Propose`. `Best`, `Snapshot` and `Checkpoint` clone under the same rule. With a
-cloner, buffers the archive drops and evaluations the host abandons are reused
-for later offspring, so a steady host allocates nothing per proposal.
+`Propose`. `Reevaluate`, `Best`, `Snapshot` and `Checkpoint` clone under the
+same rule. With a cloner, buffers the archive drops and evaluations the host
+abandons are reused for later offspring, so a steady host allocates nothing per
+proposal.
 
 ### Diversity
 
@@ -208,9 +257,9 @@ e.SetDiversity(genetic.GeneSpread[float64](bounds))
 ### Concurrency
 
 Every mutating method takes one mutex; there are no background goroutines and no
-channels. `Propose`, `CompleteEvaluation`, `BeginEvaluation`, `AbandonEvaluation`,
-`Reset`, `Best`, `Snapshot`, `Inject`, `Checkpoint`, and `Restore` are safe from
-any goroutine.
+channels. `Propose`, `Reevaluate`, `CompleteEvaluation`, `BeginEvaluation`,
+`AbandonEvaluation`, `Reset`, `Best`, `Snapshot`, `Inject`, `Checkpoint`, and
+`Restore` are safe from any goroutine.
 
 `Stats()` is lock-free: it dereferences an `atomic.Pointer[PoolStats]` republished
 after each state transition. It is safe to poll every frame. `Generation()`,
@@ -258,14 +307,15 @@ state, err := e.Checkpoint()         // Complete, caller-owned continuation poin
 err = other.Restore(state)           // Exact next proposal and EvalID
 ```
 
-`StreamingState` carries the archive, generation and last diversity, plus the
-normalized configuration, PCG position, FIFO proposal ring, pending evaluations
-with the slots they occupy, partial-generation outcome count, next ID, eviction
-counter and running state. `Restore` validates the complete value before changing
-the engine, refusing a mismatch with `ErrInvalidStreamingState`, and
-`ValidateState` runs that check alone, to preflight several engines before
+`StreamingState` carries the archive with each member's count and its turn for
+`Reevaluate`, generation and last diversity, plus the normalized configuration,
+the rate and strength in force, PCG position, FIFO proposal ring, pending
+evaluations with the slots they occupy, partial-generation outcome count, next
+ID, eviction counter and running state. `Restore` validates the complete value
+before changing the engine, refusing a mismatch with `ErrInvalidStreamingState`,
+and `ValidateState` runs that check alone, to preflight several engines before
 restoring any. The destination must use the same normalized configuration and
-equivalent initializer/operators. The state is plain generic data and
+equivalent initializer, operators and hooks. The state is plain generic data and
 standard-library `encoding/json` can encode it when the solution type can be
 encoded. `StreamingStateVersion` names the layout; a checkpoint of another
 version is refused.
@@ -357,6 +407,7 @@ reuse `dst[i]` capacity when shape-compatible.
 | `RouletteSelector` | Score-proportional, min-shifted so negative fitness works. `Floor` keeps the worst member selectable (default `1e-9`). Stateful — not goroutine-safe |
 | `UniformCombiner` | Per-element mix at `MixProbability`; emits up to 2 offspring |
 | `NPointCombiner` | `Points` crossover sites, alternating segments. Keeps a cut-point scratch buffer |
+| `BlockCombiner` | Mixes by block: the elements each of `Blocks` lists travel together, a block staying with its parent at `MixProbability`, and an element no block lists stays with its parent. For a genome whose parts work only whole, as a hidden unit's weights do |
 | `BoundedPerturbator` | Gaussian noise sigma = `strength × (Max-Min)` per gene, returned to `ParameterBounds` by `Boundary`: clamp (default), reflect, or wrap. Genes past `len(Bounds)` are left alone, a NaN result (from a non-finite range) leaves the gene untouched, and zero `strength` is a no-op |
 | `GaussianPerturbator` | Unbounded noise for numeric slices |
 | `CategoricalPerturbator` | For `[]int` assignments: each element moves, with probability `rate`, to another of its categories drawn uniformly, `Categories` for all or `Per[i]` for one; `strength` is unused |
@@ -622,7 +673,11 @@ err := reg.SaveAll()
 
 One file per species named after `SpeciesConfig.Name`. Writes go through a temp
 file + `fsync` + `rename`, so a crash mid-save leaves the previous file intact.
-`PopulationDTO.Version` is stamped from `SchemaVersion` on every save.
+`PopulationDTO.Version` is stamped from `SchemaVersion` on every save. A file
+holds each candidate's `Count` beside its score, and a `Tag` that is the
+caller's: set on the DTO before `Save` to name what the genes fit, a network's
+layout say, and compared after `Load`, since nothing else in a file of numbers
+tells a population of another shape. The registry sets none.
 
 File persistence is archive persistence, not an in-flight checkpoint: proposal
 queues, pending evaluations, IDs and RNG positions are not written. Use
@@ -724,7 +779,8 @@ whole point of the streaming model.
   displaced by a strictly better one, or, under `SetEqual`, by a new outcome for
   its own genotype.
 - With `SetEqual`, no two archive members share a genotype, and a member's score
-  is its genotype's latest.
+  is its genotype's latest, or under `SetMerge` what that made of its `Count`
+  outcomes.
 - Unevaluated genotypes never appear in the archive, statistics, or selection.
 - `EvalID` is monotonic; `0` is never issued.
 - `pending` never exceeds `PendingCapacity`, regardless of host behaviour, and
@@ -746,8 +802,8 @@ whole point of the streaming model.
   `Diversity` reads 0 and `AverageScore` equals `BestScore` long before the
   search is done.
 - Under a noisy objective the archive holds lucky outcomes: complete each
-  evaluation with the mean of several, and re-evaluate archived genotypes when
-  the objective can move.
+  evaluation with the mean of several and go round the archive with
+  `Reevaluate`, under `SetMerge` when the objective stays put.
 - `PendingCapacity` and `ProposalCapacity` round up to powers of two. Size the
   pending table at several times the evaluations in flight; a window of eight
   consecutive live ids is what evicts.

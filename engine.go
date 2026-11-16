@@ -82,10 +82,7 @@ func NewEngine[S Solution, F Numeric](
 func (e *Engine[S, F]) SetTerminator(fn TerminationFunc[S, F]) { e.terminator = fn }
 func (e *Engine[S, F]) SetDiversity(fn DiversityFunc[S, F])    { e.diversity = fn }
 
-// ScheduleFunc chooses the next generation's mutation rate and strength from the
-// pool as it stands, called before each step; AdaptiveStrength is one.
-type ScheduleFunc[F Numeric] func(generation int, stats PoolStats[F]) (rate, strength float64)
-
+// SetSchedule installs a schedule, consulted before each generation's step
 func (e *Engine[S, F]) SetSchedule(fn ScheduleFunc[F]) { e.schedule = fn }
 
 // SetSeeds places candidates in the first generation ahead of the initializer's,
