@@ -265,8 +265,10 @@ channels. `Propose`, `Reevaluate`, `CompleteEvaluation`, `BeginEvaluation`,
 after each state transition. It is safe to poll every frame. `Generation()`,
 `PendingCount()`, and `EvaluationsStarted()` read the same snapshot.
 
-Operators are invoked under the mutex and need not be goroutine-safe. Stateful
-selectors such as `RouletteSelector` rely on this.
+Operators, and the hooks a `Set` method installs, are invoked under the mutex:
+they need not be goroutine-safe, which stateful selectors such as
+`RouletteSelector` rely on, and one that calls a locking method of its own
+engine deadlocks. `Stats` is safe there.
 
 ### Determinism
 

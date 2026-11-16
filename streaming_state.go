@@ -167,9 +167,6 @@ func (e *StreamingEngine[S, F]) validateState(state StreamingState[S, F]) (*rand
 	if state.Outcomes < 0 || state.Outcomes >= e.cfg.MinOutcomesPerGen {
 		return invalid("outcomes %d outside [0,%d)", state.Outcomes, e.cfg.MinOutcomesPerGen)
 	}
-	if !(state.Rate >= 0) || !(state.Strength >= 0) {
-		return invalid("rate %v or strength %v is no mutation knob", state.Rate, state.Strength)
-	}
 	if len(state.Archive) > e.cfg.PoolSize {
 		return invalid("archive size %d exceeds capacity %d", len(state.Archive), e.cfg.PoolSize)
 	}
