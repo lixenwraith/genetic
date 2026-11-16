@@ -10,7 +10,7 @@ import (
 // Restore. The normalized configuration is embedded and checked; operator
 // identities are deliberately not serializable, so callers must restore into an
 // engine constructed with semantically equivalent operators.
-const StreamingStateVersion = 2
+const StreamingStateVersion = 3
 
 // ErrInvalidStreamingState identifies a checkpoint that cannot describe this
 // engine. Restore validates the complete value before changing live state.
@@ -25,19 +25,19 @@ type PendingEvaluation[S Solution] struct {
 	Data S      `json:"data" toml:"data"`
 }
 
-// StreamingState is a complete continuation point for StreamingEngine.
-//
-// Unlike Snapshot, which contains only the scored archive for persistence,
-// StreamingState carries the normalized configuration and every engine-owned value
-// that decides the next proposal: the PCG position, queued proposals, pending
-// evaluations and their IDs, generation phase, and counters. With a non-nil
-// Cloner, Checkpoint returns caller-owned solutions and Restore copies them back
-// into engine-owned storage.
+// StreamingState is a StreamingEngine's whole continuation point, where
+// Snapshot holds its scored archive alone: the configuration, the knobs in
+// force and every value that decides the next proposal or re-evaluation. Under
+// a Cloner, Checkpoint returns caller-owned solutions and Restore copies them
+// back. Seen runs beside Archive.
 type StreamingState[S Solution, F Numeric] struct {
 	Version       int                    `json:"version" toml:"version"`
 	Config        StreamingConfig        `json:"config" toml:"config"`
+	Rate          float64                `json:"rate" toml:"rate"`
+	Strength      float64                `json:"strength" toml:"strength"`
 	RNG           []byte                 `json:"rng" toml:"rng"`
 	Archive       []Candidate[S, F]      `json:"archive" toml:"archive"`
+	Seen          []uint64               `json:"seen" toml:"seen"`
 	Proposals     []S                    `json:"proposals" toml:"proposals"`
 	Pending       []PendingEvaluation[S] `json:"pending" toml:"pending"`
 	Generation    int                    `json:"generation" toml:"generation"`
@@ -62,8 +62,11 @@ func (e *StreamingEngine[S, F]) Checkpoint() (StreamingState[S, F], error) {
 	state := StreamingState[S, F]{
 		Version:       StreamingStateVersion,
 		Config:        e.cfg,
+		Rate:          e.rate,
+		Strength:      e.strength,
 		RNG:           rngState,
 		Archive:       make([]Candidate[S, F], len(e.archive)),
+		Seen:          append(make([]uint64, 0, len(e.seen)), e.seen...),
 		Proposals:     make([]S, e.proposals.n),
 		Pending:       make([]PendingEvaluation[S], 0, e.pending.live),
 		Generation:    e.gen,
@@ -113,6 +116,8 @@ func (e *StreamingEngine[S, F]) Restore(state StreamingState[S, F]) error {
 		candidate.Data = e.cloneForEngineLocked(candidate.Data)
 		e.archive = append(e.archive, candidate)
 	}
+	e.seen = append(e.seen, state.Seen...)
+	e.rate, e.strength = state.Rate, state.Strength
 	for _, proposal := range state.Proposals {
 		// Capacity was validated above, so push cannot fail.
 		e.proposals.push(e.cloneForEngineLocked(proposal))
@@ -165,9 +170,15 @@ func (e *StreamingEngine[S, F]) validateState(state StreamingState[S, F]) (*rand
 	if len(state.Archive) > e.cfg.PoolSize {
 		return invalid("archive size %d exceeds capacity %d", len(state.Archive), e.cfg.PoolSize)
 	}
-	for i := 1; i < len(state.Archive); i++ {
-		if state.Archive[i-1].Score < state.Archive[i].Score {
+	if len(state.Seen) != len(state.Archive) {
+		return invalid("%d seen marks for %d archive members", len(state.Seen), len(state.Archive))
+	}
+	for i, member := range state.Archive {
+		if i > 0 && state.Archive[i-1].Score < member.Score {
 			return invalid("archive is not score-descending at index %d", i)
+		}
+		if member.Count < 1 || state.Seen[i] > state.NextID {
+			return invalid("archive member %d holds %d outcomes, seen at %d of %d", i, member.Count, state.Seen[i], state.NextID)
 		}
 	}
 	if len(state.Proposals) > len(e.proposals.buf) {
@@ -223,7 +234,7 @@ func (e *StreamingEngine[S, F]) releaseOwnedLocked() {
 	for i := range e.archive {
 		e.recycleLocked(e.archive[i].Data)
 	}
-	e.archive = e.archive[:0]
+	e.archive, e.seen = e.archive[:0], e.seen[:0]
 	for {
 		proposal, ok := e.proposals.pop()
 		if !ok {

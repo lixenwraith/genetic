@@ -10,14 +10,11 @@ import (
 // EvalID identifies an in-flight evaluation; 0 is never issued
 type EvalID uint64
 
-// StreamingEngine implements a steady-state (mu+lambda) GA with caller-driven,
-// asynchronous evaluation. Proposals are drawn by the caller, scored out of band,
-// and returned via CompleteEvaluation. All state transitions run on the caller's
-// goroutine under one mutex; there are no background workers.
-//
-// The archive holds only scored candidates, sorted by score descending, and is
-// therefore elitist by construction. Unevaluated offspring live in a separate
-// bounded proposal queue and never affect statistics or selection.
+// StreamingEngine is a steady-state (mu+lambda) GA its caller drives: it draws
+// proposals, scores them out of band and returns each by CompleteEvaluation,
+// every transition on its own goroutine under one mutex. The archive holds
+// scored candidates alone, best first, so it is elitist by construction;
+// unscored offspring wait in a bounded queue outside statistics and selection
 type StreamingEngine[S Solution, F Numeric] struct {
 	initializer InitializerFunc[S]
 	selector    Selector[S, F]
@@ -26,13 +23,21 @@ type StreamingEngine[S Solution, F Numeric] struct {
 	cloner      Cloner[S]
 	diversity   DiversityFunc[S, F]
 	equal       EqualFunc[S]
+	merge       MergeFunc[F]
+	schedule    ScheduleFunc[F]
 
 	cfg StreamingConfig
+	// rate and strength are the mutation knobs in force, the config's until a
+	// schedule moves them
+	rate, strength float64
 
 	mu        sync.Mutex
 	rngSource *rand.PCG
 	rng       *rand.Rand
 	archive   []Candidate[S, F]
+	// seen is, per archive member, the id count when it was last scored or
+	// handed out by Reevaluate
+	seen []uint64
 	// version counts archive changes; the aggregates were computed at aggVersion
 	version    uint64
 	aggVersion uint64
@@ -76,9 +81,12 @@ func NewStreamingEngine[S Solution, F Numeric](
 		perturbator: perturbator,
 		cloner:      cloner,
 		cfg:         cfg,
+		rate:        cfg.PerturbationRate,
+		strength:    cfg.PerturbationStrength,
 		rngSource:   rngSource,
 		rng:         rand.New(rngSource),
 		archive:     make([]Candidate[S, F], 0, cfg.PoolSize),
+		seen:        make([]uint64, 0, cfg.PoolSize),
 		parents:     make([]Candidate[S, F], 2),
 		offspring:   make([]S, 2),
 	}
@@ -103,6 +111,29 @@ func (e *StreamingEngine[S, F]) SetDiversity(fn DiversityFunc[S, F]) {
 func (e *StreamingEngine[S, F]) SetEqual(fn EqualFunc[S]) {
 	e.mu.Lock()
 	e.equal = fn
+	e.mu.Unlock()
+}
+
+// SetMerge folds a repeat outcome into its genotype's score in place of
+// replacing it, and counts it: MeanScore keeps a running mean, for a noisy
+// objective that stays put. It acts only under SetEqual
+func (e *StreamingEngine[S, F]) SetMerge(fn MergeFunc[F]) {
+	e.mu.Lock()
+	e.merge = fn
+	e.mu.Unlock()
+}
+
+// MeanScore is the MergeFunc of a running mean, every outcome weighing alike
+func MeanScore[F Numeric](old, new F, count int) F {
+	return F(float64(old) + (float64(new)-float64(old))/float64(count+1))
+}
+
+// SetSchedule installs a schedule, consulted as each generation ends for the
+// rate and strength later offspring are bred with; the configuration's hold
+// until the first one does
+func (e *StreamingEngine[S, F]) SetSchedule(fn ScheduleFunc[F]) {
+	e.mu.Lock()
+	e.schedule = fn
 	e.mu.Unlock()
 }
 
@@ -165,6 +196,41 @@ func (e *StreamingEngine[S, F]) BeginEvaluation(sol S) EvalID {
 	return id
 }
 
+// Reevaluate hands out the archive member due another evaluation, with its id:
+// the one scored or handed out longest ago, the better of two that tie. A zero
+// id means the engine is stopped, holds nothing or has no SetEqual, without
+// which a repeat would enter as a copy
+func (e *StreamingEngine[S, F]) Reevaluate() (S, EvalID) {
+	var zero S
+	if !e.started.Load() {
+		return zero, 0
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.equal == nil || len(e.archive) == 0 {
+		return zero, 0
+	}
+	due := 0
+	for i := 1; i < len(e.seen); i++ {
+		if e.seen[i] < e.seen[due] {
+			due = i
+		}
+	}
+
+	sol := e.archive[due].Data
+	out, kept := sol, sol
+	if e.cloner != nil {
+		out = e.cloner.Clone(e.takeFreeLocked(), sol)
+		kept = e.cloner.Clone(e.takeFreeLocked(), sol)
+	}
+	id := e.beginLocked(kept)
+	e.seen[due] = uint64(id)
+	e.publishLocked()
+	return out, id
+}
+
 // CompleteEvaluation admits a scored genotype into the archive
 func (e *StreamingEngine[S, F]) CompleteEvaluation(id EvalID, score F) {
 	e.mu.Lock()
@@ -174,7 +240,7 @@ func (e *StreamingEngine[S, F]) CompleteEvaluation(id EvalID, score F) {
 	if !ok {
 		return
 	}
-	e.insertLocked(sol, score)
+	e.insertLocked(Candidate[S, F]{Data: sol, Score: score, Count: 1})
 
 	e.outcomes++
 	if e.outcomes >= e.cfg.MinOutcomesPerGen {
@@ -182,6 +248,9 @@ func (e *StreamingEngine[S, F]) CompleteEvaluation(id EvalID, score F) {
 		e.gen++
 		if e.diversity != nil {
 			e.lastDiv = e.diversity(e.archive)
+		}
+		if e.schedule != nil {
+			e.rate, e.strength = e.schedule(e.gen, e.statsLocked())
 		}
 		e.fillLocked()
 	}
@@ -266,11 +335,12 @@ func (e *StreamingEngine[S, F]) Inject(candidates []Candidate[S, F], generation 
 	for i := range e.archive {
 		e.recycleLocked(e.archive[i].Data)
 	}
-	e.archive = e.archive[:0]
+	e.archive, e.seen = e.archive[:0], e.seen[:0]
 	e.version++
 
 	for _, c := range candidates {
-		e.insertLocked(c.Data, c.Score)
+		c.Count = max(c.Count, 1)
+		e.insertLocked(c)
 	}
 	e.gen = generation
 
@@ -295,39 +365,43 @@ func (e *StreamingEngine[S, F]) beginLocked(sol S) EvalID {
 
 // insertLocked places a scored candidate into the descending archive, evicting
 // the tail when full. Under SetEqual a genotype already archived leaves first
-// and re-enters at the new score, so the archive never holds one twice
-func (e *StreamingEngine[S, F]) insertLocked(sol S, score F) {
+// and re-enters, at the score SetMerge makes of the two, so the archive never
+// holds one twice
+func (e *StreamingEngine[S, F]) insertLocked(c Candidate[S, F]) {
 	n := len(e.archive)
 	if e.equal != nil {
 		for i := range e.archive {
-			if !e.equal(e.archive[i].Data, sol) {
+			if !e.equal(e.archive[i].Data, c.Data) {
 				continue
+			}
+			if held := e.archive[i]; e.merge != nil {
+				c.Score, c.Count = e.merge(held.Score, c.Score, held.Count), held.Count+1
 			}
 			e.recycleLocked(e.archive[i].Data)
 			copy(e.archive[i:], e.archive[i+1:n])
+			copy(e.seen[i:], e.seen[i+1:n])
 			n--
-			e.archive = e.archive[:n]
 			e.version++
 			break
 		}
 	}
-	if n == cap(e.archive) && score <= e.archive[n-1].Score {
-		e.recycleLocked(sol)
+	if n == cap(e.archive) && c.Score <= e.archive[n-1].Score {
+		e.recycleLocked(c.Data)
 		return
 	}
 
 	idx := n
-	for idx > 0 && e.archive[idx-1].Score < score {
+	for idx > 0 && e.archive[idx-1].Score < c.Score {
 		idx--
 	}
 	if n == cap(e.archive) {
 		e.recycleLocked(e.archive[n-1].Data)
 		n--
-		e.archive = e.archive[:n]
 	}
-	e.archive = e.archive[:n+1]
+	e.archive, e.seen = e.archive[:n+1], e.seen[:n+1]
 	copy(e.archive[idx+1:], e.archive[idx:n])
-	e.archive[idx] = Candidate[S, F]{Data: sol, Score: score}
+	copy(e.seen[idx+1:], e.seen[idx:n])
+	e.archive[idx], e.seen[idx] = c, e.nextID
 	e.version++
 }
 
@@ -364,8 +438,7 @@ func (e *StreamingEngine[S, F]) produceLocked() bool {
 
 	pushed := false
 	for j := range n {
-		e.perturbator.Perturb(&e.offspring[j],
-			e.cfg.PerturbationRate, e.cfg.PerturbationStrength, e.rng)
+		e.perturbator.Perturb(&e.offspring[j], e.rate, e.strength, e.rng)
 		if !e.proposals.push(e.offspring[j]) {
 			return pushed
 		}
@@ -376,6 +449,12 @@ func (e *StreamingEngine[S, F]) produceLocked() bool {
 }
 
 func (e *StreamingEngine[S, F]) publishLocked() {
+	s := e.statsLocked()
+	e.stats.Store(&s)
+}
+
+// statsLocked is the engine as it stands, its aggregates redone if the archive moved
+func (e *StreamingEngine[S, F]) statsLocked() PoolStats[F] {
 	if e.aggVersion != e.version {
 		e.aggVersion = e.version
 		e.aggBest, e.aggWorst, e.aggAvg = 0, 0, 0
@@ -387,7 +466,7 @@ func (e *StreamingEngine[S, F]) publishLocked() {
 			e.aggBest, e.aggWorst, e.aggAvg = e.archive[0].Score, e.archive[n-1].Score, total/F(n)
 		}
 	}
-	e.stats.Store(&PoolStats[F]{
+	return PoolStats[F]{
 		BestScore:    e.aggBest,
 		WorstScore:   e.aggWorst,
 		AverageScore: e.aggAvg,
@@ -397,7 +476,7 @@ func (e *StreamingEngine[S, F]) publishLocked() {
 		Pending:      e.pending.live,
 		Evaluations:  e.nextID,
 		Evicted:      e.evicted,
-	})
+	}
 }
 
 // recycleLocked keeps a buffer for later offspring; without a Cloner the

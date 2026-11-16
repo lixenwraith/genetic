@@ -16,10 +16,13 @@ type Numeric interface {
 		~float32 | ~float64
 }
 
-// Candidate pairs an encoded solution with its evaluated score
+// Candidate pairs an encoded solution with its evaluated score. Count is the
+// outcomes a streaming archive's Score holds, 1 unless SetMerge folds repeats;
+// the batch engine leaves it 0
 type Candidate[S Solution, F Numeric] struct {
 	Data  S
 	Score F
+	Count int
 }
 
 // Pool is a scored candidate set. Engines maintain Members sorted by Score descending
@@ -50,6 +53,12 @@ type (
 	// EqualFunc reports whether two solutions are the same genotype; slices.Equal
 	// instantiated on the slice type is the usual choice
 	EqualFunc[S Solution] func(a, b S) bool
+	// MergeFunc folds a repeat outcome into the score its genotype holds, old
+	// over count outcomes; MeanScore is one
+	MergeFunc[F Numeric] func(old, new F, count int) F
+	// ScheduleFunc chooses the mutation rate and strength the next generation is
+	// bred with, from the pool as the last one left it; AdaptiveStrength is one
+	ScheduleFunc[F Numeric] func(generation int, stats PoolStats[F]) (rate, strength float64)
 )
 
 // Selector fills dst with parents drawn from members. version changes whenever

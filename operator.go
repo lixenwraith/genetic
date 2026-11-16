@@ -281,6 +281,44 @@ func (nc *NPointCombiner[S, T, F]) Combine(parents []Candidate[S, F], dst []S, r
 	return out
 }
 
+// BlockCombiner mixes parents a block at a time: the elements a block names
+// travel together, as one hidden unit's weights do, and an element no block
+// names stays with its parent. MixProbability is each block's chance to stay
+type BlockCombiner[S ~[]T, T any, F Numeric] struct {
+	Blocks         [][]int
+	MixProbability float64
+}
+
+func (bc *BlockCombiner[S, T, F]) Combine(parents []Candidate[S, F], dst []S, rng *rand.Rand) int {
+	if len(parents) < 2 || len(dst) == 0 {
+		return 0
+	}
+
+	p1, p2 := parents[0].Data, parents[1].Data
+	length := min(len(p1), len(p2))
+	out := min(len(dst), 2)
+	for i := range out {
+		dst[i] = resize(dst[i], length)
+		copy(dst[i], parents[i].Data)
+	}
+
+	for _, block := range bc.Blocks {
+		if rng.Float64() < bc.MixProbability {
+			continue
+		}
+		for _, i := range block {
+			if i < 0 || i >= length {
+				continue
+			}
+			dst[0][i] = p2[i]
+			if out > 1 {
+				dst[1][i] = p1[i]
+			}
+		}
+	}
+	return out
+}
+
 // --- Mutation ---
 
 // BoundedPerturbator applies Gaussian noise scaled to each gene's range and

@@ -102,6 +102,109 @@ func TestStreaming_ARepeatOutcomeReplacesItsGenotypesScore(t *testing.T) {
 	}
 }
 
+// Under SetMerge a repeat outcome folds into the score its genotype holds and
+// is counted, the member moving to where the merged score sorts
+func TestStreaming_ARepeatOutcomeMergesIntoItsGenotypesScore(t *testing.T) {
+	e := newTestEngine(t, DefaultStreamingConfig())
+	e.SetEqual(slices.Equal[[]float64])
+	e.SetMerge(MeanScore[float64])
+
+	e.CompleteEvaluation(e.BeginEvaluation([]float64{0.25}), 3.5)
+	for _, score := range []float64{6, 2, 1} {
+		e.CompleteEvaluation(e.BeginEvaluation([]float64{0.5}), score)
+	}
+
+	want := []Candidate[[]float64, float64]{
+		{Data: []float64{0.25}, Score: 3.5, Count: 1},
+		{Data: []float64{0.5}, Score: 3, Count: 3},
+	}
+	if got := e.Snapshot().Members; !reflect.DeepEqual(got, want) {
+		t.Fatalf("archive %v, want %v", got, want)
+	}
+}
+
+// Reevaluate hands out the member scored or handed out longest ago, the better
+// of two that tie, as a copy of the caller's own; with no SetEqual to know a
+// repeat by, or while stopped, it hands out nothing
+func TestStreaming_ReevaluateHandsOutTheMemberScoredLongestAgo(t *testing.T) {
+	e := newTestEngine(t, DefaultStreamingConfig())
+	for _, g := range []float64{0.3, 0.1, 0.2} {
+		e.CompleteEvaluation(e.BeginEvaluation([]float64{g}), g)
+	}
+	if _, id := e.Reevaluate(); id != 0 {
+		t.Fatal("a member was handed out with no SetEqual")
+	}
+	e.SetEqual(slices.Equal[[]float64])
+
+	var got []float64
+	var first EvalID
+	for i := range 6 {
+		g, id := e.Reevaluate()
+		got = append(got, g[0])
+		g[0] = -1
+		switch i {
+		case 0:
+			first = id
+		case 2:
+			// Scored as late as the third was handed out, and the worse of the two
+			e.CompleteEvaluation(first, 0.05)
+		}
+	}
+	if want := []float64{0.3, 0.1, 0.2, 0.1, 0.2, 0.3}; !slices.Equal(got, want) {
+		t.Fatalf("handed out %v, want %v", got, want)
+	}
+	want := []Candidate[[]float64, float64]{
+		{Data: []float64{0.2}, Score: 0.2, Count: 1},
+		{Data: []float64{0.1}, Score: 0.1, Count: 1},
+		{Data: []float64{0.3}, Score: 0.05, Count: 1},
+	}
+	if members := e.Snapshot().Members; !reflect.DeepEqual(members, want) {
+		t.Fatalf("archive %v, want %v", members, want)
+	}
+
+	e.Stop()
+	if _, id := e.Reevaluate(); id != 0 {
+		t.Fatal("a member was handed out while stopped")
+	}
+}
+
+// A schedule's knobs breed the offspring made once a generation has ended, the
+// configuration's those before, and a checkpoint carries the pair in force
+func TestStreaming_AScheduleSetsTheKnobsLaterOffspringAreBredWith(t *testing.T) {
+	cfg := DefaultStreamingConfig()
+	cfg.ProposalCapacity = 2
+	cfg.MinOutcomesPerGen = 4
+	var bred []float64
+	e := NewStreamingEngine[[]float64, float64](
+		func(rng *rand.Rand) []float64 { return []float64{rng.Float64()} },
+		&TournamentSelector[[]float64, float64]{TournamentSize: 3},
+		&UniformCombiner[[]float64, float64, float64]{MixProbability: 0.5},
+		perturbFunc(func(_ *[]float64, rate, strength float64, _ *rand.Rand) { bred = append(bred, rate*strength) }),
+		SliceCloner[[]float64, float64]{},
+		cfg,
+	)
+	e.SetSchedule(func(gen int, _ PoolStats[float64]) (float64, float64) { return 0.5, 1 / float64(gen+1) })
+	e.Start()
+
+	for range 12 {
+		g, id := e.Propose()
+		e.CompleteEvaluation(id, g[0])
+	}
+	want := []float64{0.2 * 0.15, 0.2 * 0.15, 0.5 / 2, 0.5 / 2, 0.5 / 2, 0.5 / 2, 0.5 / 3, 0.5 / 3, 0.5 / 3, 0.5 / 3, 0.5 / 4, 0.5 / 4}
+	if !reflect.DeepEqual(bred, want) {
+		t.Fatalf("offspring bred with %v, want %v", bred, want)
+	}
+	if st, _ := e.Checkpoint(); st.Rate != 0.5 || st.Strength != 0.25 {
+		t.Fatalf("checkpoint carries rate %v and strength %v", st.Rate, st.Strength)
+	}
+}
+
+type perturbFunc func(solution *[]float64, rate, strength float64, rng *rand.Rand)
+
+func (f perturbFunc) Perturb(solution *[]float64, rate, strength float64, rng *rand.Rand) {
+	f(solution, rate, strength, rng)
+}
+
 // An evaluation is evicted only when every slot its id may occupy holds a newer
 // one, so one left in flight outlives any number of completed issues
 func TestStreaming_LongEvaluationOutlivesCompletedIssues(t *testing.T) {
@@ -232,9 +335,27 @@ func TestStreaming_CheckpointContinuesTheExactStream(t *testing.T) {
 	cfg.PendingCapacity = 16
 	cfg.MinOutcomesPerGen = 3
 
-	source := newTestEngine(t, cfg)
+	// A merge, a schedule and re-evaluations put counts, seen marks and knobs
+	// other than the configuration's in the state
+	build := func() *StreamingEngine[[]float64, float64] {
+		e := newTestEngine(t, cfg)
+		e.SetEqual(slices.Equal[[]float64])
+		e.SetMerge(MeanScore[float64])
+		e.SetSchedule(func(gen int, st PoolStats[float64]) (float64, float64) { return 0.5, 0.3 / float64(gen%4+1) })
+		return e
+	}
+	next := func(e *StreamingEngine[[]float64, float64], i int) ([]float64, EvalID) {
+		if i%5 == 4 {
+			if g, id := e.Reevaluate(); id != 0 {
+				return g, id
+			}
+		}
+		return e.Propose()
+	}
+
+	source := build()
 	for i := range 15 {
-		g, id := source.Propose()
+		g, id := next(source, i)
 		switch i % 4 {
 		case 0, 1:
 			source.CompleteEvaluation(id, g[0]+float64(i)/100)
@@ -258,7 +379,7 @@ func TestStreaming_CheckpointContinuesTheExactStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored := newTestEngine(t, cfg)
+	restored := build()
 	for range 5 { // Prove Restore replaces receiver-local state.
 		g, id := restored.Propose()
 		restored.CompleteEvaluation(id, -g[0])
@@ -283,8 +404,8 @@ func TestStreaming_CheckpointContinuesTheExactStream(t *testing.T) {
 		restored.CompleteEvaluation(pending.ID, score)
 	}
 	for i := range 250 {
-		a, aid := source.Propose()
-		b, bid := restored.Propose()
+		a, aid := next(source, i)
+		b, bid := next(restored, i)
 		if aid != bid || !reflect.DeepEqual(a, b) {
 			t.Fatalf("proposal %d differs: (%d, %v) != (%d, %v)", i, aid, a, bid, b)
 		}
@@ -312,6 +433,7 @@ func TestStreaming_CheckpointContinuesTheExactStream(t *testing.T) {
 
 func TestStreaming_RestoreRejectsInvalidStateWithoutMutation(t *testing.T) {
 	e := newTestEngine(t, DefaultStreamingConfig())
+	e.CompleteEvaluation(e.BeginEvaluation([]float64{0.5}), 1)
 	e.Propose()
 	before, err := e.Checkpoint()
 	if err != nil {
@@ -324,10 +446,17 @@ func TestStreaming_RestoreRejectsInvalidStateWithoutMutation(t *testing.T) {
 	badSlot := before
 	badSlot.Pending = slices.Clone(before.Pending)
 	badSlot.Pending[0].Slot = (badSlot.Pending[0].Slot + pendingWindow) & int(e.pending.mask)
+	badSeen := before
+	badSeen.Seen = nil
+	badCount := before
+	badCount.Archive = slices.Clone(before.Archive)
+	badCount.Archive[0].Count = 0
 	for name, bad := range map[string]StreamingState[[]float64, float64]{
 		"version": badVersion,
 		"config":  badConfig,
 		"slot":    badSlot,
+		"seen":    badSeen,
+		"count":   badCount,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := e.Restore(bad); err == nil {
