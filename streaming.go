@@ -24,6 +24,7 @@ type StreamingEngine[S Solution, F Numeric] struct {
 	diversity   DiversityFunc[S, F]
 	equal       EqualFunc[S]
 	merge       MergeFunc[F]
+	rank        RankFunc[S, F]
 	schedule    ScheduleFunc[F]
 
 	cfg StreamingConfig
@@ -38,6 +39,9 @@ type StreamingEngine[S Solution, F Numeric] struct {
 	// seen is, per archive member, the id count when it was last scored or
 	// handed out by Reevaluate
 	seen []uint64
+	// keys is the rank's scratch: a key a member and the entrant's, which is
+	// why the archive has room for one over the pool
+	keys []float64
 	// version counts archive changes; the aggregates were computed at aggVersion
 	version    uint64
 	aggVersion uint64
@@ -85,8 +89,9 @@ func NewStreamingEngine[S Solution, F Numeric](
 		strength:    cfg.PerturbationStrength,
 		rngSource:   rngSource,
 		rng:         rand.New(rngSource),
-		archive:     make([]Candidate[S, F], 0, cfg.PoolSize),
-		seen:        make([]uint64, 0, cfg.PoolSize),
+		archive:     make([]Candidate[S, F], 0, cfg.PoolSize+1),
+		seen:        make([]uint64, 0, cfg.PoolSize+1),
+		keys:        make([]float64, cfg.PoolSize+1),
 		parents:     make([]Candidate[S, F], 2),
 		offspring:   make([]S, 2),
 	}
@@ -120,6 +125,17 @@ func (e *StreamingEngine[S, F]) SetEqual(fn EqualFunc[S]) {
 func (e *StreamingEngine[S, F]) SetMerge(fn MergeFunc[F]) {
 	e.mu.Lock()
 	e.merge = fn
+	e.mu.Unlock()
+}
+
+// SetRank keeps the archive by the keys fn gives its members in place of their
+// scores: fn is asked on every outcome, of the archive whole with the entrant,
+// and a full archive's last then leaves, the entrant where no key is under its
+// own. So a key may weigh a member's Count, or its fellows, and a member many
+// outcomes have tested need not yield to a newcomer's one
+func (e *StreamingEngine[S, F]) SetRank(fn RankFunc[S, F]) {
+	e.mu.Lock()
+	e.rank = fn
 	e.mu.Unlock()
 }
 
@@ -366,7 +382,7 @@ func (e *StreamingEngine[S, F]) beginLocked(sol S) EvalID {
 // insertLocked places a scored candidate into the descending archive, evicting
 // the tail when full. Under SetEqual a genotype already archived leaves first
 // and re-enters, at the score SetMerge makes of the two, so the archive never
-// holds one twice
+// holds one twice. Under SetRank the keys order it and name who leaves
 func (e *StreamingEngine[S, F]) insertLocked(c Candidate[S, F]) {
 	n := len(e.archive)
 	if e.equal != nil {
@@ -385,7 +401,11 @@ func (e *StreamingEngine[S, F]) insertLocked(c Candidate[S, F]) {
 			break
 		}
 	}
-	if n == cap(e.archive) && c.Score <= e.archive[n-1].Score {
+	if e.rank != nil {
+		e.rankLocked(c, n)
+		return
+	}
+	if n == e.cfg.PoolSize && c.Score <= e.archive[n-1].Score {
 		e.recycleLocked(c.Data)
 		return
 	}
@@ -394,7 +414,7 @@ func (e *StreamingEngine[S, F]) insertLocked(c Candidate[S, F]) {
 	for idx > 0 && e.archive[idx-1].Score < c.Score {
 		idx--
 	}
-	if n == cap(e.archive) {
+	if n == e.cfg.PoolSize {
 		e.recycleLocked(e.archive[n-1].Data)
 		n--
 	}
@@ -402,6 +422,27 @@ func (e *StreamingEngine[S, F]) insertLocked(c Candidate[S, F]) {
 	copy(e.archive[idx+1:], e.archive[idx:n])
 	copy(e.seen[idx+1:], e.seen[idx:n])
 	e.archive[idx], e.seen[idx] = c, e.nextID
+	e.version++
+}
+
+// rankLocked places c after the archive's first n and orders them all by the
+// keys the rank gives, equal keys as they stood with c last, as a score orders
+// them; the last of more than the pool holds leaves
+func (e *StreamingEngine[S, F]) rankLocked(c Candidate[S, F], n int) {
+	e.archive, e.seen = append(e.archive[:n], c), append(e.seen[:n], e.nextID)
+	keys := e.keys[:n+1]
+	e.rank(e.archive, keys)
+	for i := 1; i <= n; i++ {
+		for j := i; j > 0 && keys[j-1] < keys[j]; j-- {
+			e.archive[j-1], e.archive[j] = e.archive[j], e.archive[j-1]
+			e.seen[j-1], e.seen[j] = e.seen[j], e.seen[j-1]
+			keys[j-1], keys[j] = keys[j], keys[j-1]
+		}
+	}
+	if n == e.cfg.PoolSize {
+		e.recycleLocked(e.archive[n].Data)
+		e.archive, e.seen = e.archive[:n], e.seen[:n]
+	}
 	e.version++
 }
 
