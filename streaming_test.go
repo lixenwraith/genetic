@@ -123,6 +123,100 @@ func TestStreaming_ARepeatOutcomeMergesIntoItsGenotypesScore(t *testing.T) {
 	}
 }
 
+// A rank that keys a member by its score keeps the archive an engine with no
+// rank keeps, to the checkpoint, through outcomes that merge, displace and fail
+// to enter
+func TestStreaming_ARankByTheScoreChangesNothing(t *testing.T) {
+	run := func(ranked bool) StreamingState[[]float64, float64] {
+		cfg := DefaultStreamingConfig()
+		cfg.PoolSize, cfg.Seed = 8, 9
+		e := newTestEngine(t, cfg)
+		e.SetEqual(slices.Equal[[]float64])
+		e.SetMerge(MeanScore[float64])
+		if ranked {
+			e.SetRank(func(members []Candidate[[]float64, float64], keys []float64) {
+				for i, c := range members {
+					keys[i] = c.Score
+				}
+			})
+		}
+		for i := range 400 {
+			g, id := e.Propose()
+			if i%3 == 2 {
+				e.AbandonEvaluation(id)
+				g, id = e.Reevaluate()
+			}
+			e.CompleteEvaluation(id, float64(i*7919%13)+g[0])
+		}
+		st, err := e.Checkpoint()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if plain, ranked := run(false), run(true); !reflect.DeepEqual(plain, ranked) {
+		t.Fatal("an archive ranked by its scores is not the one an engine with no rank keeps")
+	}
+}
+
+// Under SetRank the keys order the archive and the last of a full one leaves:
+// a member four outcomes have tested stays over a newcomer's higher score, and
+// an entrant whose key is the lowest does not enter. Best and Stats follow
+func TestStreaming_ARankKeepsWhatItsKeysPutFirst(t *testing.T) {
+	e := rankedByCount(t)
+	want := []Candidate[[]float64, float64]{
+		{Data: []float64{0.1}, Score: 6, Count: 4},
+		{Data: []float64{0.3}, Score: 9, Count: 1},
+	}
+	if got := e.Snapshot().Members; !reflect.DeepEqual(got, want) {
+		t.Fatalf("archive %v, want %v", got, want)
+	}
+	best, _ := e.Best()
+	if st := e.Stats(); best.Score != 6 || st.BestScore != 6 || st.WorstScore != 9 {
+		t.Fatalf("best %v, and stats from %v to %v: want the first and the last by rank, 6 and 9", best.Score, st.BestScore, st.WorstScore)
+	}
+}
+
+// rankedByCount is an engine of two members ranked by score x count/(count+2):
+// one scored 6 four times, key 4; one scored 3, key 1, which one scored 9, key
+// 3, displaces; and one scored 8, key 2.67, under both
+func rankedByCount(t *testing.T) *StreamingEngine[[]float64, float64] {
+	t.Helper()
+	cfg := DefaultStreamingConfig()
+	cfg.PoolSize = 2
+	e := newTestEngine(t, cfg)
+	e.SetEqual(slices.Equal[[]float64])
+	e.SetMerge(MeanScore[float64])
+	e.SetRank(func(members []Candidate[[]float64, float64], keys []float64) {
+		for i, c := range members {
+			keys[i] = c.Score * float64(c.Count) / float64(c.Count+2)
+		}
+	})
+	for _, o := range []struct{ gene, score float64 }{{0.1, 6}, {0.1, 6}, {0.1, 6}, {0.1, 6}, {0.2, 3}, {0.3, 9}, {0.4, 8}} {
+		e.CompleteEvaluation(e.BeginEvaluation([]float64{o.gene}), o.score)
+	}
+	return e
+}
+
+// A ranked archive is not in score order, and its keys are its host's: Restore
+// takes it as it stands into an engine that has a rank, and an engine with
+// none still refuses it
+func TestStreaming_ARankedArchiveRestoresInItsOrder(t *testing.T) {
+	source := rankedByCount(t)
+	state, err := source.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rankedByCount(t).Restore(state); err != nil {
+		t.Fatalf("an engine with a rank refused a ranked archive: %v", err)
+	}
+	cfg := DefaultStreamingConfig()
+	cfg.PoolSize = 2
+	if err := newTestEngine(t, cfg).Restore(state); err == nil {
+		t.Fatal("an engine with no rank took an archive out of score order")
+	}
+}
+
 // Reevaluate hands out the member scored or handed out longest ago, the better
 // of two that tie, as a copy of the caller's own; with no SetEqual to know a
 // repeat by, or while stopped, it hands out nothing

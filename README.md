@@ -54,7 +54,7 @@ type Candidate[S Solution, F Numeric] struct {
 }
 
 type Pool[S Solution, F Numeric] struct {
-    Members    []Candidate[S, F]  // Sorted by Score descending
+    Members    []Candidate[S, F]  // Sorted by Score descending, or by SetRank's keys
     Generation int
     Stats      PoolStats[F]
 }
@@ -77,6 +77,7 @@ type TerminationFunc[S Solution, F Numeric] func(pool *Pool[S, F], iteration int
 type DiversityFunc[S Solution, F Numeric]   func(members []Candidate[S, F]) float64
 type EqualFunc[S Solution]                  func(a, b S) bool
 type MergeFunc[F Numeric]                   func(old, new F, count int) F
+type RankFunc[S Solution, F Numeric]        func(members []Candidate[S, F], keys []float64)
 type ScheduleFunc[F Numeric]                func(generation int, stats PoolStats[F]) (rate, strength float64)
 ```
 
@@ -201,10 +202,30 @@ e.SetMerge(genetic.MeanScore[float64])
 ```
 
 A `MergeFunc` takes the score held, the new one and the count behind the first,
-so a capped mean, an exponential one or the better of the two is a line. A
-member enters on one outcome whatever the others hold, so the head of a merged
-archive can be a lucky newcomer: a host that fields its best takes the first
-member whose `Count` it trusts from `Snapshot`, not `Best`.
+so a capped mean, an exponential one or the better of the two is a line.
+
+A member enters on one outcome whatever the others hold, so an archive ranked
+by score lets a newcomer's lucky one displace a member many have tested, and
+its head is the luckiest. `SetRank` ranks it by keys the host gives instead:
+
+```go
+e.SetRank(func(members []genetic.Candidate[[]float64, float64], keys []float64) {
+    for i, c := range members { // a mean weighed with eight outcomes at nothing
+        keys[i] = c.Score * float64(c.Count) / float64(c.Count+8)
+    }
+})
+```
+
+The hook is asked on every outcome, of the whole archive with the entrant, and
+writes a key a member. The archive is kept by key, the higher first and equal
+keys as they stood with the entrant last, and the last leaves a full one: the
+entrant itself where no key is under its own. A key may read its fellows, as a
+share held for members short of some count does by keying them under the
+rest. `Best`, `Reevaluate`'s tie and the first and last scores of `Stats`
+follow the rank; selection still reads `Score`, and a host that breeds by its
+keys passes a `Selector` of its own. The keys are the host's and are not kept:
+a checkpoint carries the archive in its order, which `Restore` under a rank
+takes as it stands, and the archive is ranked again at the next outcome.
 
 ### Schedule
 
@@ -776,10 +797,11 @@ whole point of the streaming model.
 
 ## Invariants
 
-- The archive is sorted by `Score` descending and never exceeds `PoolSize`.
-- Outside `Inject` and `Restore`, a candidate leaves the archive only by being
-  displaced by a strictly better one, or, under `SetEqual`, by a new outcome for
-  its own genotype.
+- The archive is sorted by `Score` descending, or under `SetRank` by its keys,
+  and never exceeds `PoolSize`.
+- Outside `Inject` and `Restore`, a candidate leaves the archive only as its
+  last when an outcome enters above it, by score or by key, or, under
+  `SetEqual`, by a new outcome for its own genotype.
 - With `SetEqual`, no two archive members share a genotype, and a member's score
   is its genotype's latest, or under `SetMerge` what that made of its `Count`
   outcomes.
@@ -805,7 +827,8 @@ whole point of the streaming model.
   search is done.
 - Under a noisy objective the archive holds lucky outcomes: complete each
   evaluation with the mean of several and go round the archive with
-  `Reevaluate`, under `SetMerge` when the objective stays put.
+  `Reevaluate`, under `SetMerge` when the objective stays put, and rank it by
+  what the outcomes prove with `SetRank`.
 - `PendingCapacity` and `ProposalCapacity` round up to powers of two. Size the
   pending table at several times the evaluations in flight; a window of eight
   consecutive live ids is what evicts.

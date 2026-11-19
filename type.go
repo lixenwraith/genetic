@@ -25,7 +25,8 @@ type Candidate[S Solution, F Numeric] struct {
 	Count int
 }
 
-// Pool is a scored candidate set. Engines maintain Members sorted by Score descending
+// Pool is a scored candidate set. Engines maintain Members sorted by Score
+// descending, a streaming one under SetRank by its keys
 type Pool[S Solution, F Numeric] struct {
 	Members    []Candidate[S, F]
 	Generation int
@@ -56,6 +57,9 @@ type (
 	// MergeFunc folds a repeat outcome into the score its genotype holds, old
 	// over count outcomes; MeanScore is one
 	MergeFunc[F Numeric] func(old, new F, count int) F
+	// RankFunc writes the key each member of an archive ranks by, keys[i] for
+	// members[i], the higher first
+	RankFunc[S Solution, F Numeric] func(members []Candidate[S, F], keys []float64)
 	// ScheduleFunc chooses the mutation rate and strength the next generation is
 	// bred with, from the pool as the last one left it; AdaptiveStrength is one
 	ScheduleFunc[F Numeric] func(generation int, stats PoolStats[F]) (rate, strength float64)

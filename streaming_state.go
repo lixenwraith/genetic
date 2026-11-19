@@ -154,6 +154,10 @@ func (e *StreamingEngine[S, F]) validateState(state StreamingState[S, F]) (*rand
 	if state.Version != StreamingStateVersion {
 		return invalid("version %d, want %d", state.Version, StreamingStateVersion)
 	}
+	// A rank's keys are its host's and not kept, so its archive is taken in its order
+	e.mu.Lock()
+	ranked := e.rank != nil
+	e.mu.Unlock()
 	if state.Config != e.cfg {
 		return invalid("configuration does not match destination engine")
 	}
@@ -174,7 +178,7 @@ func (e *StreamingEngine[S, F]) validateState(state StreamingState[S, F]) (*rand
 		return invalid("%d seen marks for %d archive members", len(state.Seen), len(state.Archive))
 	}
 	for i, member := range state.Archive {
-		if i > 0 && state.Archive[i-1].Score < member.Score {
+		if !ranked && i > 0 && state.Archive[i-1].Score < member.Score {
 			return invalid("archive is not score-descending at index %d", i)
 		}
 		if member.Count < 1 || state.Seen[i] > state.NextID {

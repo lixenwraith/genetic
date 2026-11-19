@@ -50,6 +50,18 @@ README instead.
   the fewest outcomes first: 3450 and 3370 against 3570 by age under a
   schedule, level without one. A schedule following the average score, and one
   decaying by generation, ended level with `AdaptiveStrength` at its floor.
+- A rank is asked on an outcome and never between: a `SetRank` hook that reads
+  its host's state, a running mean say, orders the archive as that state stood
+  at the last outcome, which is the order `Snapshot` and a checkpoint show.
+  Keyed by `Score` it must keep an unranked engine's checkpoint, which is how
+  a host proves its hook is wired before it reads anything off it.
+- A ranked archive was measured on vif's learner, whose rounds are that noisy
+  game: members of eight outcomes or more held above the rest, both by a mean
+  weighed with eight outcomes at the recent mean, a newcomer displacing only
+  one of the rest. A member tested over fifty outcomes no longer leaves, and
+  what a run fields held out is the unranked archive's within what luck moves.
+  Entering on the first outcome, with no second to confirm it, fielded a
+  quarter less.
 - `Engine.Checkpoint`'s members alias the engine's buffers, which the next
   generation writes over: copy them before running the source engine on, as its
   test does. `Restore` into an engine of another configuration or pool size is
