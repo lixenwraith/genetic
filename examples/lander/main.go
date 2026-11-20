@@ -182,7 +182,7 @@ func newSource(name, colour string, startX float64, seed uint64) source {
 	cfg.PoolSize = 24
 	// A shallow queue keeps proposals bred from the current archive, not a stale one
 	cfg.ProposalCapacity = 8
-	// Four times the flights a stream may have in the air, so a window never fills
+	// More than the flights a stream may have in the air, so none is evicted
 	cfg.PendingCapacity = 4 * maxLive
 	cfg.MinOutcomesPerGen = 8
 	// Four genes: mutate two per child on average, at a tenth of each range

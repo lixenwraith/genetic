@@ -25,6 +25,7 @@ type StreamingEngine[S Solution, F Numeric] struct {
 	equal       EqualFunc[S]
 	merge       MergeFunc[F]
 	rank        RankFunc[S, F]
+	due         DueFunc[S, F]
 	schedule    ScheduleFunc[F]
 
 	cfg StreamingConfig
@@ -139,6 +140,14 @@ func (e *StreamingEngine[S, F]) SetRank(fn RankFunc[S, F]) {
 	e.mu.Unlock()
 }
 
+// SetDue has Reevaluate hand out the member fn names in place of the one scored
+// longest ago, for a host whose repeats follow what its outcomes prove
+func (e *StreamingEngine[S, F]) SetDue(fn DueFunc[S, F]) {
+	e.mu.Lock()
+	e.due = fn
+	e.mu.Unlock()
+}
+
 // MeanScore is the MergeFunc of a running mean, every outcome weighing alike
 func MeanScore[F Numeric](old, new F, count int) F {
 	return F(float64(old) + (float64(new)-float64(old))/float64(count+1))
@@ -213,9 +222,10 @@ func (e *StreamingEngine[S, F]) BeginEvaluation(sol S) EvalID {
 }
 
 // Reevaluate hands out the archive member due another evaluation, with its id:
-// the one scored or handed out longest ago, the better of two that tie. A zero
-// id means the engine is stopped, holds nothing or has no SetEqual, without
-// which a repeat would enter as a copy
+// the one SetDue's hook names, or with none the one scored or handed out longest
+// ago, the better of two that tie. A zero id means the engine is stopped, holds
+// nothing, has no SetEqual, without which a repeat would enter as a copy, or
+// its hook named no member
 func (e *StreamingEngine[S, F]) Reevaluate() (S, EvalID) {
 	var zero S
 	if !e.started.Load() {
@@ -229,9 +239,15 @@ func (e *StreamingEngine[S, F]) Reevaluate() (S, EvalID) {
 		return zero, 0
 	}
 	due := 0
-	for i := 1; i < len(e.seen); i++ {
-		if e.seen[i] < e.seen[due] {
-			due = i
+	if e.due != nil {
+		if due = e.due(e.archive); due < 0 || due >= len(e.archive) {
+			return zero, 0
+		}
+	} else {
+		for i := 1; i < len(e.seen); i++ {
+			if e.seen[i] < e.seen[due] {
+				due = i
+			}
 		}
 	}
 

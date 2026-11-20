@@ -60,6 +60,9 @@ type (
 	// RankFunc writes the key each member of an archive ranks by, keys[i] for
 	// members[i], the higher first
 	RankFunc[S Solution, F Numeric] func(members []Candidate[S, F], keys []float64)
+	// DueFunc names the archive member due another evaluation, by its place in
+	// members; a place outside them names none
+	DueFunc[S Solution, F Numeric] func(members []Candidate[S, F]) int
 	// ScheduleFunc chooses the mutation rate and strength the next generation is
 	// bred with, from the pool as the last one left it; AdaptiveStrength is one
 	ScheduleFunc[F Numeric] func(generation int, stats PoolStats[F]) (rate, strength float64)

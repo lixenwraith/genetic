@@ -78,6 +78,7 @@ type DiversityFunc[S Solution, F Numeric]   func(members []Candidate[S, F]) floa
 type EqualFunc[S Solution]                  func(a, b S) bool
 type MergeFunc[F Numeric]                   func(old, new F, count int) F
 type RankFunc[S Solution, F Numeric]        func(members []Candidate[S, F], keys []float64)
+type DueFunc[S Solution, F Numeric]         func(members []Candidate[S, F]) int
 type ScheduleFunc[F Numeric]                func(generation int, stats PoolStats[F]) (rate, strength float64)
 ```
 
@@ -156,15 +157,14 @@ id := e.BeginEvaluation(myGenes)  // Copied under a Cloner; kept as is when nil
 
 `EvalID` is monotonic and `0` is never issued, so it doubles as a validity flag.
 
-**Completion is optional.** An evaluation occupies one of the eight slots from
-its id's home slot in the pending table, and a new one evicts the oldest id in
-its window only when all eight hold newer ones. So `PendingCapacity` bounds the
-evaluations in flight, an evaluation left alone in a sparse table is never lost,
-and under load the oldest goes first. An evicted genotype is recycled,
-`PoolStats.Evicted` increments, and a late `CompleteEvaluation` for it is
-ignored, which makes it safe for the host to drop evaluations it can no longer
-score. Size `PendingCapacity` at about four times the evaluations the host keeps
-in flight, so a window rarely fills; a climbing `Evicted` says it did.
+**Completion is optional.** An evaluation takes the first free slot of the
+pending table from its id's home slot, and a new one evicts the oldest id only
+when the table is full. So `PendingCapacity` bounds the evaluations in flight
+and none is lost under it. An evicted genotype is recycled, `PoolStats.Evicted`
+increments, and a late `CompleteEvaluation` for it is ignored, which makes it
+safe for the host to drop evaluations it can no longer score. Size
+`PendingCapacity` at what the host keeps in flight; a climbing `Evicted` says
+the host holds more, or drops them.
 
 Asynchronous completion biases the early archive: evaluations that finish fast
 are admitted first and become the first parents. The initializer is used only
@@ -183,13 +183,16 @@ the lander example flies each genotype four times; and evaluate archive members
 again, which `Reevaluate` hands out in turn:
 
 ```go
-genes, id := e.Reevaluate()     // id == 0: stopped, empty, or no SetEqual
+genes, id := e.Reevaluate()     // id == 0: stopped, empty, no SetEqual, or none due
 ```
 
 It returns the member scored or handed out longest ago, the better of two that
 tie, so a host that calls it in place of every nth `Propose` goes round the
 archive, and its outcome comes back through `CompleteEvaluation` like any
-other. What a repeat does to the score is the host's to say:
+other. A host whose repeats follow what its outcomes prove names the member
+itself: `SetDue` takes a `DueFunc`, asked of the archive at each `Reevaluate`,
+and a place outside the archive hands out nothing. What a repeat does to the
+score is the host's to say:
 
 - By default the new score replaces the old, which follows an objective that
   moves: another population, as in the lander example, or a world that changes.
@@ -488,7 +491,7 @@ cfg.Seed = 0xC0FFEE
 | `RefillMode` | `RefillDeterministic` | Full deterministic refill; opt into `RefillTimeBudget` only when scheduling-dependent streams are acceptable |
 | `TickBudget` | 500µs | Wall-clock cap for `RefillTimeBudget`; ignored by deterministic refills |
 | `ProposalCapacity` | 32 | Depth of the unevaluated offspring ring; rounded up to a power of two |
-| `PendingCapacity` | 512 | Pending-table slots, rounded up to a power of two; bounds the evaluations in flight, and an evaluation is evicted only when the eight slots from its id's home slot all hold newer ones |
+| `PendingCapacity` | 512 | Pending-table slots, rounded up to a power of two, a value under 8 taking the default; bounds the evaluations in flight, and the oldest is evicted only from a full table |
 | `MinOutcomesPerGen` | 5 | Completed evaluations that advance `Generation` |
 | `DefaultTournamentSize` | 3 | Consumed by `registry`, not by config |
 | `DefaultMixProbability` | 0.5 | Consumed by `registry`, not by config |
@@ -808,8 +811,7 @@ whole point of the streaming model.
 - Unevaluated genotypes never appear in the archive, statistics, or selection.
 - `EvalID` is monotonic; `0` is never issued.
 - `pending` never exceeds `PendingCapacity`, regardless of host behaviour, and
-  an evaluation is evicted only when the eight slots from its home slot all
-  hold newer ones.
+  an evaluation is evicted only from a full table, the oldest first.
 - With a non-nil `Cloner`, no solution handed to a caller aliases engine memory.
 - `Stats()` never blocks and never observes a torn snapshot.
 - A successful `Restore(Checkpoint())` reproduces the next proposal, ID, every
@@ -830,8 +832,9 @@ whole point of the streaming model.
   `Reevaluate`, under `SetMerge` when the objective stays put, and rank it by
   what the outcomes prove with `SetRank`.
 - `PendingCapacity` and `ProposalCapacity` round up to powers of two. Size the
-  pending table at several times the evaluations in flight; a window of eight
-  consecutive live ids is what evicts.
+  pending table at the evaluations in flight, 8 at the least, and not far over:
+  only a full one evicts, and a put into a full one or a completion of an id
+  it no longer holds reads the whole table.
 - `Snapshot`, `Checkpoint`, and `Best` clone when a `Cloner` is configured;
   `Stats` does not touch solutions at all. Prefer `Stats` for telemetry.
 - `RefillTimeBudget` intentionally weakens seeded reproducibility; deterministic
