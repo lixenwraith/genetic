@@ -19,12 +19,10 @@ const (
 	DefaultMixProbability       = 0.5
 )
 
-// RefillMode selects how StreamingEngine bounds proposal refills.
-//
-// Deterministic refills are the default: the queue is filled completely, so a
-// seed and an operation sequence determine one proposal stream independently of
-// machine speed. Time-budgeted refills are available for callers that prefer a
-// wall-clock bound and accept that scheduling can change the stream.
+// RefillMode selects how StreamingEngine bounds proposal refills. Deterministic
+// refills, the default, fill the queue completely, so a seed and an operation
+// sequence determine one proposal stream whatever the machine's speed; a time
+// budget bounds a refill by the wall clock and lets scheduling change the stream
 type RefillMode uint8
 
 const (
@@ -92,8 +90,9 @@ type StreamingConfig struct {
 	TickBudget time.Duration
 	// ProposalCapacity is the depth of the unevaluated offspring queue
 	ProposalCapacity int
-	// PendingCapacity bounds in-flight evaluations; rounded up to a power of two.
-	// A new one evicts the oldest only when this many are in flight
+	// PendingCapacity bounds in-flight evaluations; rounded up to a power of two,
+	// and a value under 8 takes the default. A new one evicts the oldest only
+	// when this many are in flight
 	PendingCapacity int
 	// MinOutcomesPerGen is the outcome count that advances a generation
 	MinOutcomesPerGen int

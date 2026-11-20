@@ -491,7 +491,7 @@ cfg.Seed = 0xC0FFEE
 | `RefillMode` | `RefillDeterministic` | Full deterministic refill; opt into `RefillTimeBudget` only when scheduling-dependent streams are acceptable |
 | `TickBudget` | 500µs | Wall-clock cap for `RefillTimeBudget`; ignored by deterministic refills |
 | `ProposalCapacity` | 32 | Depth of the unevaluated offspring ring; rounded up to a power of two |
-| `PendingCapacity` | 512 | Pending-table slots, rounded up to a power of two; bounds the evaluations in flight, and the oldest is evicted only from a full table |
+| `PendingCapacity` | 512 | Pending-table slots, rounded up to a power of two, a value under 8 taking the default; bounds the evaluations in flight, and the oldest is evicted only from a full table |
 | `MinOutcomesPerGen` | 5 | Completed evaluations that advance `Generation` |
 | `DefaultTournamentSize` | 3 | Consumed by `registry`, not by config |
 | `DefaultMixProbability` | 0.5 | Consumed by `registry`, not by config |
@@ -832,7 +832,9 @@ whole point of the streaming model.
   `Reevaluate`, under `SetMerge` when the objective stays put, and rank it by
   what the outcomes prove with `SetRank`.
 - `PendingCapacity` and `ProposalCapacity` round up to powers of two. Size the
-  pending table at the evaluations in flight; only a full one evicts.
+  pending table at the evaluations in flight, 8 at the least, and not far over:
+  only a full one evicts, and a put into a full one or a completion of an id
+  it no longer holds reads the whole table.
 - `Snapshot`, `Checkpoint`, and `Best` clone when a `Cloner` is configured;
   `Stats` does not touch solutions at all. Prefer `Stats` for telemetry.
 - `RefillTimeBudget` intentionally weakens seeded reproducibility; deterministic

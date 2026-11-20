@@ -311,7 +311,8 @@ func (f perturbFunc) Perturb(solution *[]float64, rate, strength float64, rng *r
 
 // An evaluation in flight is lost only to a full table, the oldest first: fifteen
 // held through any number of completed issues stay, the table never holds more
-// than its capacity, and the outcome of one it gave up is ignored
+// than its capacity, the outcome of one it gave up is ignored, and a full table
+// with an id far from its home slot restores
 func TestStreaming_AnEvaluationIsEvictedOnlyFromAFullTableTheOldestFirst(t *testing.T) {
 	cfg := DefaultStreamingConfig()
 	cfg.PendingCapacity = 16
@@ -323,7 +324,8 @@ func TestStreaming_AnEvaluationIsEvictedOnlyFromAFullTableTheOldestFirst(t *test
 		_, id := e.Propose()
 		held = append(held, id)
 	}
-	for range 10_000 {
+	// One past a lap of the table, so the id that fills it lands a lap from its home
+	for range 10_001 {
 		g, id := e.Propose()
 		e.CompleteEvaluation(id, g[0])
 	}
@@ -331,6 +333,9 @@ func TestStreaming_AnEvaluationIsEvictedOnlyFromAFullTableTheOldestFirst(t *test
 		t.Fatalf("evaluations in flight under the capacity were lost: evicted %d, pending %d", s.Evicted, s.Pending)
 	}
 	e.Propose()
+	if st, _ := e.Checkpoint(); newTestEngine(t, cfg).Restore(st) != nil {
+		t.Fatal("a full table, an id a lap from its home, did not restore")
+	}
 	e.Propose()
 	if s := e.Stats(); s.Evicted != 1 || s.Pending != cfg.PendingCapacity {
 		t.Fatalf("a put into a full table evicted %d and left %d pending, want one and the capacity", s.Evicted, s.Pending)
@@ -427,9 +432,9 @@ func TestStreaming_Deterministic(t *testing.T) {
 	}
 }
 
-// TestStreaming_CheckpointContinuesTheExactStream exercises every value that an
-// archive-only snapshot used to lose: PCG position, queued offspring, pending
-// genotypes, partial-generation outcomes, and the next evaluation id.
+// A checkpoint carries what a snapshot of the archive alone would lose: PCG
+// position, queued offspring, pending genotypes, partial-generation outcomes
+// and the next evaluation id, so the restored engine continues the exact stream
 func TestStreaming_CheckpointContinuesTheExactStream(t *testing.T) {
 	cfg := DefaultStreamingConfig()
 	cfg.Seed = 0x51A7E

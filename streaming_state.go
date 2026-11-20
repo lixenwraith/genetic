@@ -10,7 +10,7 @@ import (
 // Restore. The normalized configuration is embedded and checked; operator
 // identities are deliberately not serializable, so callers must restore into an
 // engine constructed with semantically equivalent operators.
-const StreamingStateVersion = 3
+const StreamingStateVersion = 4
 
 // ErrInvalidStreamingState identifies a checkpoint that cannot describe this
 // engine. Restore validates the complete value before changing live state.

@@ -10,9 +10,10 @@ README instead.
 ## Genetic
 
 - `StreamingStateVersion` names the layout `Checkpoint` writes and `Restore`
-  reads. A change to `StreamingState`'s layout bumps it, and a host that carries
-  the checkpoint in a capture of its own bumps that capture's version too: vif's
-  capture holds `registry.SpeciesState`, which embeds it.
+  reads. A change to `StreamingState`'s layout bumps it, and so does a change
+  to how a state is continued, as the pending table's eviction rule was. A host
+  that carries the checkpoint in a capture of its own bumps that capture's
+  version too: vif's capture holds `registry.SpeciesState`, which embeds it.
 - A program over the library is tuned by its `-headless` table, several seeds
   at once in the background with a `sed` variant per constant, not by watching
   it: `examples/lander`'s crash rate at one setting varies by half between
