@@ -45,13 +45,10 @@ func (r *ring[S]) clear() {
 	r.head, r.n = 0, 0
 }
 
-// pendingWindow is how many slots from its home slot an evaluation may occupy
-const pendingWindow = 8
-
 // pendingTable is a fixed-capacity open-addressing table keyed by EvalID. A put
-// probes the id's window for a free slot and otherwise evicts the oldest id in
-// it, so an evaluation is lost only once its window is full of newer ones.
-// Slot id 0 marks a free entry
+// takes the first free slot from the id's home and, with none free, the oldest
+// id's, so an evaluation is lost only to a full table of newer ones. Slot id 0
+// marks a free entry
 type pendingTable[S any] struct {
 	mask uint64
 	ids  []EvalID
@@ -66,12 +63,10 @@ func (t *pendingTable[S]) init(capacity int) {
 	t.mask = uint64(c - 1)
 }
 
-func (t *pendingTable[S]) window() uint64 { return uint64(min(pendingWindow, len(t.ids))) }
-
 func (t *pendingTable[S]) put(id EvalID, v S) (evicted S, hit bool) {
 	home := uint64(id) & t.mask
 	oldest := home
-	for k := range t.window() {
+	for k := range uint64(len(t.ids)) {
 		i := (home + k) & t.mask
 		if t.ids[i] == 0 {
 			t.ids[i], t.data[i] = id, v
@@ -93,7 +88,7 @@ func (t *pendingTable[S]) take(id EvalID) (S, bool) {
 		return zero, false
 	}
 	home := uint64(id) & t.mask
-	for k := range t.window() {
+	for k := range uint64(len(t.ids)) {
 		i := (home + k) & t.mask
 		if t.ids[i] == id {
 			v := t.data[i]
@@ -106,14 +101,10 @@ func (t *pendingTable[S]) take(id EvalID) (S, bool) {
 }
 
 // place installs a restored entry at the slot its checkpoint recorded, so the
-// restored table evicts as the source would
+// restored table fills as the source would
 func (t *pendingTable[S]) place(slot int, id EvalID, v S) {
 	t.ids[slot], t.data[slot] = id, v
 	t.live++
-}
-
-func (t *pendingTable[S]) inWindow(slot int, id EvalID) bool {
-	return (uint64(slot)-(uint64(id)&t.mask))&t.mask < t.window()
 }
 
 func (t *pendingTable[S]) clear() {

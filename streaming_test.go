@@ -218,9 +218,10 @@ func TestStreaming_ARankedArchiveRestoresInItsOrder(t *testing.T) {
 }
 
 // Reevaluate hands out the member scored or handed out longest ago, the better
-// of two that tie, as a copy of the caller's own; with no SetEqual to know a
-// repeat by, or while stopped, it hands out nothing
-func TestStreaming_ReevaluateHandsOutTheMemberScoredLongestAgo(t *testing.T) {
+// of two that tie, or the one a SetDue hook names, as a copy of the caller's
+// own; with no SetEqual to know a repeat by, where the hook names none, or
+// while stopped, it hands out nothing
+func TestStreaming_ReevaluateHandsOutTheMemberDue(t *testing.T) {
 	e := newTestEngine(t, DefaultStreamingConfig())
 	for _, g := range []float64{0.3, 0.1, 0.2} {
 		e.CompleteEvaluation(e.BeginEvaluation([]float64{g}), g)
@@ -254,6 +255,15 @@ func TestStreaming_ReevaluateHandsOutTheMemberScoredLongestAgo(t *testing.T) {
 	}
 	if members := e.Snapshot().Members; !reflect.DeepEqual(members, want) {
 		t.Fatalf("archive %v, want %v", members, want)
+	}
+
+	e.SetDue(func(members []Candidate[[]float64, float64]) int { return len(members) - 1 })
+	if g, _ := e.Reevaluate(); g[0] != 0.3 {
+		t.Fatalf("handed out %v, want the last member, which the host named", g)
+	}
+	e.SetDue(func([]Candidate[[]float64, float64]) int { return -1 })
+	if _, id := e.Reevaluate(); id != 0 {
+		t.Fatal("a member was handed out where the host named none")
 	}
 
 	e.Stop()
@@ -299,40 +309,39 @@ func (f perturbFunc) Perturb(solution *[]float64, rate, strength float64, rng *r
 	f(solution, rate, strength, rng)
 }
 
-// An evaluation is evicted only when every slot its id may occupy holds a newer
-// one, so one left in flight outlives any number of completed issues
-func TestStreaming_LongEvaluationOutlivesCompletedIssues(t *testing.T) {
+// An evaluation in flight is lost only to a full table, the oldest first: fifteen
+// held through any number of completed issues stay, the table never holds more
+// than its capacity, and the outcome of one it gave up is ignored
+func TestStreaming_AnEvaluationIsEvictedOnlyFromAFullTableTheOldestFirst(t *testing.T) {
 	cfg := DefaultStreamingConfig()
 	cfg.PendingCapacity = 16
 	cfg.Seed = 6
 	e := newTestEngine(t, cfg)
 
-	_, long := e.Propose()
+	var held []EvalID
+	for range cfg.PendingCapacity - 1 {
+		_, id := e.Propose()
+		held = append(held, id)
+	}
 	for range 10_000 {
 		g, id := e.Propose()
 		e.CompleteEvaluation(id, g[0])
 	}
-	e.CompleteEvaluation(long, 2)
-	if s := e.Stats(); s.Evicted != 0 || s.BestScore != 2 {
-		t.Fatalf("the long evaluation was lost: evicted %d, best %v", s.Evicted, s.BestScore)
+	if s := e.Stats(); s.Evicted != 0 || s.Pending != len(held) {
+		t.Fatalf("evaluations in flight under the capacity were lost: evicted %d, pending %d", s.Evicted, s.Pending)
 	}
-}
-
-// Abandoned and never-completed evaluations must not grow pending without bound
-func TestStreaming_PendingBounded(t *testing.T) {
-	cfg := DefaultStreamingConfig()
-	cfg.PendingCapacity = 16
-	cfg.Seed = 3
-	e := newTestEngine(t, cfg)
-
-	for range 10_000 {
-		e.Propose() // Never completed
+	e.Propose()
+	e.Propose()
+	if s := e.Stats(); s.Evicted != 1 || s.Pending != cfg.PendingCapacity {
+		t.Fatalf("a put into a full table evicted %d and left %d pending, want one and the capacity", s.Evicted, s.Pending)
 	}
-	if p := e.Stats().Pending; p > 16 {
-		t.Fatalf("pending unbounded: %d", p)
+	e.CompleteEvaluation(held[0], 3)
+	if best := e.Stats().BestScore; best == 3 {
+		t.Fatal("the oldest evaluation was not the one evicted")
 	}
-	if e.Stats().Evicted == 0 {
-		t.Fatal("expected evictions")
+	e.CompleteEvaluation(held[1], 2)
+	if best := e.Stats().BestScore; best != 2 {
+		t.Fatalf("the second oldest was lost with the oldest: best %v", best)
 	}
 }
 
@@ -539,7 +548,7 @@ func TestStreaming_RestoreRejectsInvalidStateWithoutMutation(t *testing.T) {
 	badConfig.Config.PoolSize++
 	badSlot := before
 	badSlot.Pending = slices.Clone(before.Pending)
-	badSlot.Pending[0].Slot = (badSlot.Pending[0].Slot + pendingWindow) & int(e.pending.mask)
+	badSlot.Pending[0].Slot = len(e.pending.ids)
 	badSeen := before
 	badSeen.Seen = nil
 	badCount := before

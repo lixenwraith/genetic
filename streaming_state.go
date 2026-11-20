@@ -18,7 +18,7 @@ var ErrInvalidStreamingState = errors.New("genetic: invalid streaming state")
 
 // PendingEvaluation is one genotype handed to a caller and still awaiting an
 // outcome. ID is preserved so a restored host can complete work already in
-// flight, and Slot so the restored table evicts as the source would.
+// flight, and Slot so the restored table fills as the source would.
 type PendingEvaluation[S Solution] struct {
 	ID   EvalID `json:"id" toml:"id"`
 	Slot int    `json:"slot" toml:"slot"`
@@ -205,7 +205,7 @@ func (e *StreamingEngine[S, F]) validateState(state StreamingState[S, F]) (*rand
 			return invalid("duplicate pending id %d", pending.ID)
 		}
 		ids[pending.ID] = struct{}{}
-		if pending.Slot < 0 || pending.Slot >= len(e.pending.ids) || !e.pending.inWindow(pending.Slot, pending.ID) {
+		if pending.Slot < 0 || pending.Slot >= len(e.pending.ids) {
 			return invalid("pending id %d cannot occupy slot %d", pending.ID, pending.Slot)
 		}
 		if other, exists := slots[pending.Slot]; exists {

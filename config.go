@@ -93,7 +93,7 @@ type StreamingConfig struct {
 	// ProposalCapacity is the depth of the unevaluated offspring queue
 	ProposalCapacity int
 	// PendingCapacity bounds in-flight evaluations; rounded up to a power of two.
-	// Evaluations older than this many issues are evicted
+	// A new one evicts the oldest only when this many are in flight
 	PendingCapacity int
 	// MinOutcomesPerGen is the outcome count that advances a generation
 	MinOutcomesPerGen int
